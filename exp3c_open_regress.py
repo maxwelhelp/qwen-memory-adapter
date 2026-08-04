@@ -1,4 +1,7 @@
-# Эксперимент 3b: ВЕКТОРНАЯ ИНЪЕКЦИЯ, ОБУЧЕНИЕ НА ОТКРЫТОМ ДАТАСЕТЕ.
+# Эксперимент 3c: открытый словарь + ПРЯМАЯ РЕГРЕССИЯ mix на target_in.
+# exp3b: acc_open 0, val_mse застряло 8.8 — ‖mix‖ 178 затопляет h_in (нужно ~36),
+# CE по всему словарю слишком разрежен. Здесь: MSE(mix, target_in) — прямой сигнал
+# правильного Δ входа (oracle: mix≈target_in ⇒ ответ правильный) + MSE(h_out') + CE.
 # exp3a (обучен на 6 кандидатах): open-тест 0/40 — W_out извлекает только знакомые
 # секреты. Здесь: датасет со СЛУЧАЙНЫМИ секретами (dataset_yattn_open_train.pt),
 # лосс = MSE(h_out', h_outB) + 0.5·CE(lm_head(h_out_p), ПЕРВЫЙ ТОКЕН СЕКРЕТА по всему
@@ -180,7 +183,10 @@ def main():
             # CE по ВСЕМУ словарю: первый токен секрета (открытый словарь!)
             lg = qwen.lm_head(h_out_p.unsqueeze(0).to(qwen.lm_head.weight.dtype))[0]
             tgt_tok = d["secret_tok0"].to(DEV)
-            loss = lossf(h_out_p, y_out) + 0.5 * cef(lg, tgt_tok)
+            tin = d["target_in"].to(DEV)
+            loss = (0.5 * lossf(mv, tin)                       # ГЛАВНОЕ: mix ≈ target_in
+                    + 0.1 * lossf(h_out_p, y_out)
+                    + 0.5 * cef(lg, tgt_tok))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -215,8 +221,8 @@ def main():
               f"val_mse = {v_mse / nv:.4f} | ‖mix‖ = {vd / nv:.2f} | "
               f"g = {model.g().item():.3f} | {pt}", flush=True)
 
-    torch.save(model.state_dict(), "exp3b_open_train.pt")
-    print("Сохранено: exp3b_open_train.pt", flush=True)
+    torch.save(model.state_dict(), "exp3c_open_regress.pt")
+    print("Сохранено: exp3c_open_regress.pt", flush=True)
 
 
 if __name__ == "__main__":
