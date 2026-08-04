@@ -115,17 +115,21 @@ class AtomBank(nn.Module):
         exp3a/exp5 — 'запись необучаемая'). k_seq/v_seq: [T,D] (уже из windowed
         key / точечного value). eta_t: [T] — вес токена из энтропии Qwen (unsupervised)."""
         buf = write_buf
-        # БЕЗ no_grad: buf — графовый узел от k/v/eta → key_pool, W_k, W_v, gate_key
-        # обучаются через mix_vec → loss (фикс «запись не обучалась»).
-        for t in range(len(k_seq)):
-            if eta_t[t] < ETA_MIN_SKIP:
-                continue
-            g = self.gate(k_seq[t])                      # [n_atoms], нелинейный обученный гейт
-            mask = self.top_k_mask(g)
-            gm = g * mask                                   # разреженная взвешенная активация
-            strength = (ETA_WRITE * eta_t[t] * gm).unsqueeze(-1)   # [n_atoms,1]
-            decay = (GAMMA * mask).unsqueeze(-1)
-            buf = buf * (1 - decay) + strength * (v_seq[t].unsqueeze(0) - buf)
+        # ЗАПИСЬ — НЕОБУЧАЕМАЯ МЕХАНИКА (no_grad), как delta-rule в exp2n/exp3a/exp5:
+        # попытка обучать запись через buf-граф (даже с сегментным детачем) дала взрыв
+        # clip_norm ~10^6 (4-е подтверждение нестабильности bilevel в этой схеме).
+        # НО: gate_key ОБУЧАЕТСЯ через ЧТЕНИЕ (read_atoms внутри mix_vec дифференцируемо) —
+        # в отличие от exp5, где route_keys (argmax-запись) был мёртвым параметром.
+        with torch.no_grad():
+            for t in range(len(k_seq)):
+                if eta_t[t] < ETA_MIN_SKIP:
+                    continue
+                g = self.gate(k_seq[t])                      # [n_atoms], обученный гейт (запись)
+                mask = self.top_k_mask(g)
+                gm = g * mask                                   # разреженная взвешенная активация
+                strength = (ETA_WRITE * eta_t[t] * gm).unsqueeze(-1)   # [n_atoms,1]
+                decay = (GAMMA * mask).unsqueeze(-1)
+                buf = buf * (1 - decay) + strength * (v_seq[t].unsqueeze(0) - buf)
         return buf
 
     def read_atoms(self, write_buf, q):
