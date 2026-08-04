@@ -126,6 +126,7 @@ class LinSlotsAssoc(nn.Module):
 
 
 def main():
+    torch.manual_seed(0)   # ДЕТЕРМИНИЗМ: фикс. seed для сравнения версий
     import sys as _sys
     data = torch.load(_sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt")
     ex = [d for d in data if d["n_ctx"] < MAX_CTX_S]
