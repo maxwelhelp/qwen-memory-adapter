@@ -49,7 +49,9 @@ def run_case(mem, ctx, q):
 
 def main():
     mem = LinSlotsAssoc().to(DEV)
-    mem.load_state_dict(torch.load("exp2h_linear_assoc_eta.pt"))
+    import sys
+    wpath = sys.argv[1] if len(sys.argv) > 1 else "exp2h_linear_assoc_eta.pt"
+    mem.load_state_dict(torch.load(wpath))
     rng = random.Random(7)
     tot = tot_ctx = tot_no = 0
     for marker, q in TYPES:
