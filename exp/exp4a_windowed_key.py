@@ -1,21 +1,22 @@
-# Эксперимент 3a: ВЕКТОРНАЯ ИНЪЕКЦИЯ (открытый словарь) на рабочей схеме exp2n.
-# Зачем: 6 чисел = голосование за закрытый список кандидатов; вектор во вход
-# последнего слоя = Qwen сама доводит до логпробов ВСЕГО словаря (открытый словарь).
-# Oracle показал: последний слой пропускает правильный вектор (acc6=1.00, усиление
-# ~7.7x). Раньше (exp1b) не сходилось из-за раздутого mix — но то было ДО правильной
-# структуры (линейные слоты+delta-rule+η). Здесь: W_out 896→896, mix_vec во h_in[-1],
-# лосс = MSE(h_out', h_outB) + 0.5·CE(кандидаты). Метрики: val_mse, acc6, acc_open.
-# exp2m: энтропия предсказания Qwen различает секрет/мусор (AUC 0.85); это сигнал
-# «писать то, что удивляет ОСНОВНУЮ СЕТЬ» — бесплатно при forward, работает на
-# инференсе (без разметки). η_t = 0.1 + 0.9·(ent_t/max_ent), порог ETA_MIN_SKIP.
-# Всё остальное как exp2h (линейные слоты, delta-rule, retrieval).
-# Ключевой урок серии: НЕЛИНЕЙНЫЙ слот не является ассоциативной памятью —
-# M(q) для q≠записанного k произволен. ЛИНЕЙНЫЙ слот M(q)=W·q с записью
-# W += η(v−Wk)kᵀ даёт M(q) = Wq + η(v−Wk)(k·q) — извлечение по похожести АВТОМАТИЧЕСКИ
-# (поэтому линейные слоты v5 давали 34/40, а MLP — никогда).
-# Здесь: 32 линейных слота (без GELU) + ассоциативная запись соседними парами
-# (k=W_k(h_t) → v=W_v(h_{t+1})) с η-гейтом (mask_secret, секрет=1/мусор=0.1) + порог,
-# чтение: w=softmax(q·W_route), mix6 = g·W_out(Σ w_i·W_i·q). Запись необучаемая (детach).
+# Эксперимент 4a: WINDOWED KEY — ключ памяти строится из локального окна вокруг
+# удивившего токена, а не из одной точки h_t.
+#
+# Зачем: в exp2n/exp3a ключ k = W_k(h_t) — снимок ОДНОЙ позиции. Если тип факта
+# ("от почты", "от телефона") стоит рядом с секретом, но сам не вызывает удивления
+# у Qwen (η мал), он в ключ вообще не попадает — отсюда интерференция типов на
+# масштабе (exp2n_full, 320 примеров: путаница «пароль/пин-код»).
+#
+# Идея (обсуждали): вместо k=h_t брать k = attn_pool(h_{t-w_before..t+w_after}) —
+# обучаемый локальный attention-пулинг по окну вокруг t. Веса пулинга учатся сами
+# (score = Linear(h), softmax по окну) — модель сама решает, какие соседние токены
+# несут информацию "к чему относится" этот факт. Value (v = h_{t+1}) остаётся
+# точечным — мы хотим ТОЧНО вернуть значение секрета, а не его контекст.
+#
+# Всё остальное — как в exp3a: линейные слоты + delta-rule + η-гейт из энтропии
+# Qwen (без учителя) + векторная инъекция во вход последнего слоя (открытый словарь).
+#
+# Это ablation №1 из мини-плана (4a). Следующий шаг при подтверждении эффекта — 4c
+# (per-type routing heads) поверх этой же схемы.
 
 import torch, torch.nn as nn, torch.nn.functional as F, random
 from train_memory_distill import (
@@ -26,6 +27,7 @@ from train_memory_distill import (
 def qwen_lmhead_logits(h_out):
     """логпробы ПОЛНОГО словаря (открытый словарь) — для acc_open"""
     return qwen.lm_head(h_out.unsqueeze(0).to(qwen.lm_head.weight.dtype))[0]
+
 
 D = 896
 N_SLOTS = 32
@@ -39,6 +41,10 @@ LR = 3e-3
 PROJ_ITERS = 300
 PHASE2_EPOCHS = 15
 
+# --- новые гиперпараметры окна ---
+WIN_BEFORE = 2   # сколько токенов ДО t включать в ключ (контекст "к чему относится")
+WIN_AFTER = 1    # сколько токенов ПОСЛЕ t (иногда тип идёт сразу за секретом)
+
 
 class LinearSlot(nn.Module):
     """один линейный слот: M(q) = W·q (без нелинейности — ассоциативная память)"""
@@ -50,18 +56,45 @@ class LinearSlot(nn.Module):
         return q @ self.W.t()
 
 
-class LinSlotsAssoc(nn.Module):
+class LocalWindowPool(nn.Module):
+    """Обучаемый attention-пулинг по локальному окну вокруг позиции t.
+    score(h_i) = Linear(h_i) -> softmax по окну -> взвешенная сумма.
+    Даёт ключу семантику соседних токенов ("от почты"/"от телефона"),
+    а не только точку самого удивившего токена."""
+    def __init__(self, d, w_before=WIN_BEFORE, w_after=WIN_AFTER):
+        super().__init__()
+        self.w_before, self.w_after = w_before, w_after
+        self.score = nn.Linear(d, 1)
+
+    def pooled_all(self, h_ctx):
+        """Возвращает [T, D] — для каждой позиции t пуленный вектор окна.
+        Векторизовано через unfold было бы быстрее, но T тут мало (<200),
+        поэтому простой питоновский цикл ради читаемости."""
+        T = h_ctx.shape[0]
+        out = []
+        for t in range(T):
+            lo = max(0, t - self.w_before)
+            hi = min(T, t + self.w_after + 1)
+            window = h_ctx[lo:hi]                      # [w, D]
+            scores = self.score(window).squeeze(-1)     # [w]
+            weights = torch.softmax(scores, dim=0)
+            pooled = (weights.unsqueeze(-1) * window).sum(0)  # [D]
+            out.append(pooled)
+        return torch.stack(out)                          # [T, D]
+
+
+class LinSlotsAssocCtx(nn.Module):
     def __init__(self):
         super().__init__()
         self.slots = nn.ModuleList([LinearSlot() for _ in range(N_SLOTS)])
         self.route_keys = nn.Parameter(torch.randn(N_SLOTS, D) * 0.01)
         self.W_route = nn.Parameter(torch.randn(N_SLOTS, D) * 0.01)
+        self.key_pool = LocalWindowPool(D)     # NEW: локальный пулинг для ключа
         self.W_k = nn.Linear(D, D, bias=False)
         self.W_v = nn.Linear(D, D, bias=False)
         self.W_q = nn.Linear(D, D, bias=False)
-        self.W_out = nn.Linear(D, D)   # ВЕКТОР 896 (инъекция во вход последнего слоя)
+        self.W_out = nn.Linear(D, D)   # вектор 896 (инъекция во вход последнего слоя)
         self.g_logit = nn.Parameter(torch.zeros(()))
-        self.W_eta = nn.Linear(D, 1)
         self.eta_min, self.eta_max = 0.1, 1.0
 
     def g(self):
@@ -70,11 +103,14 @@ class LinSlotsAssoc(nn.Module):
     def write_work(self, h_ctx, entropy=None):
         if entropy is not None:
             self.entropy = entropy
-        """delta-rule запись по слотам: W_s += η_t·(v − W_s·k)⊗k, соседние пары (k_t→v_{t+1});
-        η-гейт (mask_secret-учитель), порог ETA_MIN_SKIP — мусор не пишем"""
-        k = F.gelu(self.W_k(h_ctx[:-1]))
-        v = F.gelu(self.W_v(h_ctx[1:]))
-        eta_t = self.eta_min + (self.eta_max - self.eta_min) * (self.entropy / (self.entropy.max() + 1e-8))
+        """delta-rule запись по слотам: ключ теперь = W_k(pool(окно вокруг t)),
+        значение по-прежнему точечное v = W_v(h_{t+1}) — мы хотим вернуть ТОЧНОЕ
+        значение секрета, контекст нужен только для различения "какой именно"."""
+        pooled = self.key_pool.pooled_all(h_ctx)          # [T, D]
+        k = F.gelu(self.W_k(pooled[:-1]))                  # ключ из окна
+        v = F.gelu(self.W_v(h_ctx[1:]))                     # значение точечное, как раньше
+        eta_t = self.eta_min + (self.eta_max - self.eta_min) * (
+            self.entropy / (self.entropy.max() + 1e-8))
         work = {}
         for c in range(0, len(k), CHUNK):
             groups = {}
@@ -90,7 +126,6 @@ class LinSlotsAssoc(nn.Module):
                 kks = torch.stack([kk for _, kk, _ in items])
                 vvs = torch.stack([vv for _, _, vv in items])
                 wts = eta_t[torch.tensor([j for j, _, _ in items], device=kks.device)]
-                # delta-rule: W ← W(1−γ) − η·∇‖Wk−v‖² = W(1−γ) + η·Σ wts·(v−Wk)⊗k
                 for _ in range(1):
                     pred = kks @ W.t()
                     iloss = (wts * (pred - vvs).pow(2).mean(-1)).mean()
@@ -116,14 +151,6 @@ class LinSlotsAssoc(nn.Module):
         out, w = self.read_batch(q, work)
         return self.g() * self.W_out((out * w.unsqueeze(1)).sum(0))
 
-    def read_theta(self, q):
-        """отклик θ₀ (для пре-обучения проекций)"""
-        w = torch.softmax(q @ self.W_route.t(), dim=0)
-        Ws = torch.stack([self.slots[i].W for i in range(N_SLOTS)])
-        qb = q.unsqueeze(0).expand(N_SLOTS, -1)
-        out = torch.einsum('bd,bdh->bh', qb, Ws.transpose(1, 2))
-        return (out * w.unsqueeze(1)).sum(0)
-
 
 def main():
     import sys as _sys
@@ -135,12 +162,15 @@ def main():
     n_val = max(1, len(ex) // 10)
     train, val = ex[n_val:][:N_TRAIN], ex[:n_val]
 
-    model = LinSlotsAssoc().to(DEV)
+    model = LinSlotsAssocCtx().to(DEV)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     lossf = nn.MSELoss()
     cef = nn.CrossEntropyLoss()
 
     # пре-обучение проекций k/v/q ≈ identity (выравнивание)
+    # ВАЖНО: k теперь строится из pooled-окна, поэтому выравниваем W_k тоже на
+    # pooled-представлении (пулинг на старте почти uniform, так что hh годится
+    # как приближение — донастроится в фазе 2 вместе с score-головой пулинга).
     print("пре-обучение проекций (≈identity) ...", flush=True)
     for st in range(PROJ_ITERS):
         opt.zero_grad()
@@ -154,9 +184,8 @@ def main():
         if st % 100 == 99:
             print(f"  pre {st}: {loss.item():.4f}", flush=True)
 
-    # ФАЗА 1.5 ОТСУТСТВУЕТ: η = нормированная энтропия Qwen (удивление
-    # основной сети, exp2m AUC 0.85) — без учителя, работает на инференсе.
-    print("фаза 2: линейные слоты + delta-rule + η-гейт + retrieval ...", flush=True)
+    print("фаза 2: windowed key + линейные слоты + delta-rule + η-гейт + retrieval ...",
+          flush=True)
     for ep in range(PHASE2_EPOCHS):
         model.train()
         tot = 0.0
@@ -170,7 +199,7 @@ def main():
             work = model.write_work(ctx, d["entropy"].to(DEV))
             mv = model.mix_vec(q_h, work)
             h_inj = h_all.clone()
-            h_inj[-1] = h_inj[-1] + mv                       # ИНЪЕКЦИЯ во вход последнего слоя
+            h_inj[-1] = h_inj[-1] + mv
             h_out_p = last_layer_forward(h_inj)
             loss = lossf(h_out_p, y_out) + 0.5 * cef(cand_logits(h_out_p), tgt)
             loss.backward()
@@ -181,7 +210,6 @@ def main():
 
         model.eval()
         vacc, va_open, v_mse, vd, nv = 0, 0, 0.0, 0.0, 0
-        confusion = {}
         per_type = {}
         for d in val:
             ctx = d["ctx_hidden"].to(DEV)
@@ -189,7 +217,7 @@ def main():
             h_all = d["h_inA_all"].to(DEV)
             y_out = d["h_outB"].to(DEV)
             tgt = SECRET_TO_IDX[d["secret"]]
-            work = model.write_work(ctx, d["entropy"].to(DEV))          # ВНЕ no_grad (клоны)
+            work = model.write_work(ctx, d["entropy"].to(DEV))
             with torch.no_grad():
                 mv = model.mix_vec(q_h, work)
                 h_inj = h_all.clone()
@@ -207,22 +235,20 @@ def main():
                 per_type.setdefault(d["type"], [0, 0])
                 per_type[d["type"]][0] += ok_open
                 per_type[d["type"]][1] += 1
-                if "referent" in d:
-                    pred_secret = SECRETS[c6.argmax(-1).item()]
-                    ref_of_pred = dict(d["pairs"]).get(pred_secret)
-                    if ref_of_pred is not None:
-                        confusion[(d["referent"], ref_of_pred)] = \
-                            confusion.get((d["referent"], ref_of_pred), 0) + 1
         pt = " ".join(f"{k}:{c[0]}/{c[1]}" for k, c in per_type.items())
         print(f"  val: acc6 = {vacc / nv:.2f} | acc_open = {va_open / nv:.2f} | "
               f"val_mse = {v_mse / nv:.4f} | ‖mix‖ = {vd / nv:.2f} | "
               f"g = {model.g().item():.3f} | {pt}", flush=True)
-        if confusion:
-            cstr = " | ".join(f"{k[0]}->{k[1]}:{v}" for k, v in sorted(confusion.items()))
-            print(f"  confusion: {cstr}", flush=True)
 
-    torch.save(model.state_dict(), "exp3a_vector_injection.pt")
-    print("Сохранено: exp3a_vector_injection.pt", flush=True)
+    torch.save(model.state_dict(), "exp4a_windowed_key.pt")
+    print("Сохранено: exp4a_windowed_key.pt", flush=True)
+
+    # --- сравнение с exp3a напечатать вручную ---
+    print("\nСравни acc_open и per_type с exp3a (25/40, 62.5%) — если 4a лучше "
+          "именно на разнотипных/масштабных случаях, окно даёт эффект. "
+          "На текущем датасете (1 секрет на тип) эффекта может почти не быть — "
+          "нужен multi-type тест-сет (см. план, эксп. отдельно генерировать).",
+          flush=True)
 
 
 if __name__ == "__main__":
