@@ -136,17 +136,20 @@ def main():
             opt.step(); opt.zero_grad()
 
         # ---- val: mse, acc6, acc_open (весь словарь), norm(mix − target_in), per-type ----
+        # ВАЖНО: write_work НЕЛЬЗЯ вызывать под no_grad (клоны с requires_grad_ не строят
+        # граф в no_grad → autograd.grad падает). Как в v5: write_work вне no_grad,
+        # остальное (чтение/метрики) — под no_grad.
         model.eval()
         v_mse, a6, a_open, v_d, nv = 0.0, 0, 0, 0.0, 0
         per_type = {}
-        with torch.no_grad():
-            for d in val:
-                ctx = d["ctx_hidden"].to(DEV)
-                q = d["q_hidden"].to(DEV)
-                h_all = d["h_inA_all"].to(DEV)
-                y_out = d["h_outB"].to(DEV)
-                tgt = SECRET_TO_IDX[d["secret"]]
-                work = model.write_work(ctx)
+        for d in val:
+            ctx = d["ctx_hidden"].to(DEV)
+            q = d["q_hidden"].to(DEV)
+            h_all = d["h_inA_all"].to(DEV)
+            y_out = d["h_outB"].to(DEV)
+            tgt = SECRET_TO_IDX[d["secret"]]
+            work = model.write_work(ctx)          # вне no_grad — граф клонов нужен
+            with torch.no_grad():
                 mv = model.mix_vector(q, work)
                 h_inj = h_all.clone()
                 h_inj[-1] = h_inj[-1] + mv
