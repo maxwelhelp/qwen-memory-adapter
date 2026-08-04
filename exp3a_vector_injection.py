@@ -59,7 +59,7 @@ class LinSlotsAssoc(nn.Module):
         self.W_k = nn.Linear(D, D, bias=False)
         self.W_v = nn.Linear(D, D, bias=False)
         self.W_q = nn.Linear(D, D, bias=False)
-        self.W_out = nn.Linear(D, 6)
+        self.W_out = nn.Linear(D, D)   # ВЕКТОР 896 (инъекция во вход последнего слоя)
         self.g_logit = nn.Parameter(torch.zeros(()))
         self.W_eta = nn.Linear(D, 1)
         self.eta_min, self.eta_max = 0.1, 1.0
