@@ -72,6 +72,18 @@ Qwen выброшен) память подмешивает знание обра
 | `exp2f_surprise_test.py` | Удивление ‖M(h)−h‖² различает секрет/мусор (AUC 0.89) — сигнал «что писать» без учителя |
 | `exp2m_qwen_surprise.py` | Удивление ОСНОВНОЙ СЕТИ (энтропия/NLL Qwen) различает секрет/мусор (AUC 0.85/0.78) |
 | `gen_entropy.py` | Добавляет поле entropy (удивление Qwen) в dataset_yattn.pt |
+
+### Экспериментальная ветка (exp/ — windowed key, dynamic gate, rank-1 атомы)
+
+| Файл | Что делает |
+|---|---|
+| `exp/AGENT_TASK.md` | Задание: multitype-датасет + confusion + сравнение exp3a/4a/5 |
+| `exp/exp4a_windowed_key.py` | Windowed key (ключ из окна контекста) — стабилизирует векторную инъекцию: yattn 1.00/0.88 |
+| `exp/exp5_ctx_dynamic_gate.py` | + динамический гейт (энтропия Qwen × уверенность роутинга) + cross-session через диск: 0.875 |
+| `exp/exp6*_atoms.py` | Rank-1 атомы (384 вместо 32 слотов) — 4 итерации, все хуже слотов — **ветка закрыта** |
+| `exp/session_write.py` / `session_read.py` | Межпроцессная персистентность (реально 2 процесса ОС) — 3/3 match |
+| `exp/gen_multitype.py` | Мульти-тайп датасет (3 секрета одного типа + referent) — задача НЕ решена (все = шанс) |
+| `exp/RESULTS_exp4_exp5.md` | Сводная таблица всех версий |
 | `versions/` | **Архив ВСЕХ версий кода памяти** (v1→v5): delta-rule, первая MLP-попытка, smoke Titans, smoke слотов, рабочая версия — с описанием результата каждой (versions/README.md) |
 
 ### Документация (docs/)
