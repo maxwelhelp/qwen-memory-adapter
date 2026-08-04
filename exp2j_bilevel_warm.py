@@ -1,4 +1,8 @@
-# Эксперимент 2i: BILEVEL поверх рабочей схемы (exp2h) — ЗАПИСЬ ОБУЧАЕМАЯ.
+# Эксперимент 2j: BILEVEL С ТЁПЛЫМ СТАРТОМ — инициализация весами exp2h_full.pt.
+# exp2i (bilevel с нуля) не сошёлся: слоты стартовали с 0, внешний градиент должен был
+# учить всё сразу через шумные шаги записи. Здесь: θ₀/головы УЖЕ обучены (exp2h_full,
+# межсессионный 34/40), bilevel-фаза только ДООБУЧИВАЕТ запись — внешний сигнал
+# с первого шага содержательный. Всё остальное как exp2i.
 # exp2h: запись на клонах (detach) — механика не обучается. Здесь: delta-rule шаги
 # на ЖИВЫХ параметрах с create_graph=True — внешний лосс (MSE(mix,target6)+CE) течёт
 # через шаги записи в θ₀ слотов, W_k/W_v/W_q, W_route, W_out, g. «Память учится».
@@ -117,6 +121,10 @@ def main():
     train, val = ex[n_val:][:N_TRAIN], ex[:n_val]
 
     model = LinSlotsAssoc().to(DEV)
+    # ТЁПЛЫЙ СТАРТ: веса рабочей схемы (exp2h_full, межсессионный 34/40)
+    sd = torch.load("exp2h_full.pt")
+    model.load_state_dict(sd)
+    print("загружены веса exp2h_full.pt (тёплый старт)", flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     lossf = nn.MSELoss()
     cef = nn.CrossEntropyLoss()
@@ -206,8 +214,8 @@ def main():
         print(f"  val: acc6 = {vacc / nv:.2f} | ‖mix6−target6‖ = {vd / nv:.2f} | "
               f"g = {model.g().item():.3f} | {pt}", flush=True)
 
-    torch.save(model.state_dict(), "exp2i_bilevel_linear.pt")
-    print("Сохранено: exp2i_bilevel_linear.pt", flush=True)
+    torch.save(model.state_dict(), "exp2j_bilevel_warm.pt")
+    print("Сохранено: exp2j_bilevel_warm.pt", flush=True)
 
 
 if __name__ == "__main__":
