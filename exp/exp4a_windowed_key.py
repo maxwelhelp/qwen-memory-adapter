@@ -155,7 +155,9 @@ class LinSlotsAssocCtx(nn.Module):
 def main():
     torch.manual_seed(0)   # ДЕТЕРМИНИЗМ: фикс. seed для сравнения версий
     import sys as _sys
-    data = torch.load(_sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt")
+    _ds_path = _sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt"
+    _ds_tag = "multitype" if "multi" in _ds_path else "yattn"
+    data = torch.load(_ds_path)
     ex = [d for d in data if d["n_ctx"] < MAX_CTX_S]
     print(f"примеров с контекстом < {MAX_CTX_S}: {len(ex)}", flush=True)
     rng = random.Random(0)

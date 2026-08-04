@@ -246,7 +246,9 @@ def cross_session_eval(ckpt_path, val, tag=""):
 def main():
     torch.manual_seed(0)   # ДЕТЕРМИНИЗМ: фикс. seed для сравнения версий
     import sys as _sys
-    data = torch.load(_sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt")
+    _ds_path = _sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt"
+    _ds_tag = "multitype" if "multi" in _ds_path else "yattn"
+    data = torch.load(_ds_path)
     ex = [d for d in data if d["n_ctx"] < MAX_CTX_S]
     print(f"примеров с контекстом < {MAX_CTX_S}: {len(ex)}", flush=True)
     rng = random.Random(0)
@@ -339,7 +341,7 @@ def main():
             cstr = " | ".join(f"{k[0]}->{k[1]}:{v}" for k, v in sorted(confusion.items()))
             print(f"  confusion: {cstr}", flush=True)
 
-    ckpt_path = "exp5_ctx_gate.pt"
+    ckpt_path = "exp5_ctx_gate_" + _ds_tag + ".pt"
     torch.save(model.state_dict(), ckpt_path)
     print(f"Сохранено: {ckpt_path}", flush=True)
 

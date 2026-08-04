@@ -240,7 +240,9 @@ def cross_session_eval(ckpt_path, val, tag=""):
 def main():
     torch.manual_seed(0)   # ДЕТЕРМИНИЗМ: фикс. seed для сравнения версий
     import sys as _sys
-    data = torch.load(_sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt")
+    _ds_path = _sys.argv[1] if len(_sys.argv) > 1 else "dataset_yattn.pt"
+    _ds_tag = "multitype" if "multi" in _ds_path else "yattn"
+    data = torch.load(_ds_path)
     ex = [d for d in data if d["n_ctx"] < MAX_CTX_S]
     print(f"примеров с контекстом < {MAX_CTX_S}: {len(ex)}", flush=True)
     rng = random.Random(0)
@@ -338,7 +340,7 @@ def main():
         print(f"  val (in-process): acc6 = {vacc/nv:.2f} | acc_open = {va_open/nv:.2f} | "
               f"val_mse = {v_mse/nv:.4f} | ‖mix‖ = {vd/nv:.2f} | {pt}", flush=True)
 
-    ckpt_path = "exp6_atoms.pt"
+    ckpt_path = "exp6_atoms_" + _ds_tag + ".pt"
     torch.save(model.state_dict(), ckpt_path)
     print(f"Сохранено: {ckpt_path}", flush=True)
 
