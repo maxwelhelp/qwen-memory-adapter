@@ -19,6 +19,7 @@ N_PAIRS = 16
 S = 4            # шагов записи на чанк
 LR = 1e-2
 STEPS = 400
+ALIGN_STEPS = 200   # alignment: слот учится M(h)≈h (как фаза 1 v5) — иначе отклик нормы 308, не 15
 
 
 class Slot(nn.Module):
@@ -40,13 +41,26 @@ def slot_fwd(x, W1, W2):
 def run(mode):
     torch.manual_seed(0)
     slot = Slot().to(DEV)
-    eta_raw = nn.Parameter(torch.tensor(0.1, device=DEV))   # обучаемый lr записи
+    eta_raw = nn.Parameter(torch.tensor(-1.0, device=DEV))  # η = softplus ≈ 0.31 (как ETA v5)
     gam_raw = nn.Parameter(torch.tensor(-2.0, device=DEV))  # γ = sigmoid ≈ 0.12
     opt = torch.optim.Adam(list(slot.parameters()) + [eta_raw, gam_raw], lr=LR)
     lossf = nn.MSELoss()
 
     ks = torch.randn(N_PAIRS, D, device=DEV) * 15
     vs = torch.randn(N_PAIRS, D, device=DEV) * 15
+
+    # ---- ALIGNMENT (как фаза 1 v5): слот учится воспроизводить входы ----
+    # без этого случайный слот даёт отклик нормы ~300 на входе нормы 15 —
+    # не-выровненное состояние (в v5 это фаза 1, M(h)≈h)
+    print("alignment: M(h)≈h на случайных векторах нормы 15 ...", flush=True)
+    for st in range(ALIGN_STEPS):
+        opt.zero_grad()
+        h = torch.randn(D, device=DEV) * 15
+        aloss = lossf(slot(h), h)
+        aloss.backward()
+        opt.step()
+        if st % 50 == 49:
+            print(f"  align {st}: loss {aloss.item():.4f}", flush=True)
 
     print(f"=== режим {mode} ===", flush=True)
     for step in range(STEPS):
@@ -58,21 +72,32 @@ def run(mode):
 
         if mode == "bilevel":
             # запись: арифметика БЕЗ detach — W1/W2 становятся графовыми узлами,
-            # граф идёт через η_raw, gam_raw и исходные θ₀
+            # граф идёт через η_raw, gam_raw и исходные θ₀.
+            # Шаги НОРМИРОВАННЫЕ (ĝ=g/||g||) — как в v5 (решение №5: взрывы при ETA=0.5).
             W1, W2 = slot.net[0].weight, slot.net[2].weight
             for _ in range(S):
                 iloss = lossf(slot_fwd(k, W1, W2), k)
                 g1, g2 = torch.autograd.grad(iloss, [W1, W2], create_graph=True)
+                g1 = g1 / (g1.norm() + 1e-8)
+                g2 = g2 / (g2.norm() + 1e-8)
                 W1 = W1 * (1 - gam) - eta * g1
                 W2 = W2 * (1 - gam) - eta * g2
         else:
-            # detach: как v5 — механика записи ВНЕ графа, η/γ/θ₀ не обучаются
-            W1, W2 = slot.net[0].weight.detach(), slot.net[2].weight.detach()
+            # detach: как v5 — механика записи ВНЕ графа, η/γ/θ₀ не обучаются.
+            # Локальные клоны с requires_grad — чтобы посчитать шаги записи,
+            # но в оптимизаторе их нет: opt.step() ничего не двигает (контроль).
+            W1 = slot.net[0].weight.detach().clone().requires_grad_(True)
+            W2 = slot.net[2].weight.detach().clone().requires_grad_(True)
             for _ in range(S):
                 iloss = lossf(slot_fwd(k, W1, W2), k)
                 g1, g2 = torch.autograd.grad(iloss, [W1, W2])
-                W1 = W1 * (1 - gam.detach()) - eta.detach() * g1
-                W2 = W2 * (1 - gam.detach()) - eta.detach() * g2
+                g1 = g1 / (g1.norm() + 1e-8)
+                g2 = g2 / (g2.norm() + 1e-8)
+                with torch.no_grad():
+                    W1 = W1 * (1 - gam.detach()) - eta.detach() * g1
+                    W2 = W2 * (1 - gam.detach()) - eta.detach() * g2
+                W1 = W1.requires_grad_(True)
+                W2 = W2.requires_grad_(True)
 
         loss = lossf(slot_fwd(k, W1, W2), v)   # чтение пары
         loss.backward()
