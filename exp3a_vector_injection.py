@@ -19,7 +19,7 @@
 
 import torch, torch.nn as nn, torch.nn.functional as F, random
 from train_memory_distill import (
-    last_layer_forward, cand_logits, qwen, SEC_TOK_VALUES, SECRET_TO_IDX, DEV,
+    last_layer_forward, cand_logits, qwen, SECRETS, SEC_TOK_VALUES, SECRET_TO_IDX, DEV,
 )
 
 
